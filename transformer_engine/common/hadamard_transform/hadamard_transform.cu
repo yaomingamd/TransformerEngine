@@ -21,7 +21,7 @@
 namespace transformer_engine {
 namespace {
 
-constexpr int kThreadsPerWarp = 32;
+constexpr int kThreadsPerWarp = static_cast<int>(::THREADS_PER_WARP);
 
 template <typename IType, int kHadamardDimension, int BUFF_DIM_Y, int BUFF_DIM_X,
           bool kReturnPreRhtAmax, bool kReturnIdentityAmax, bool kReturnTransposedAmax>

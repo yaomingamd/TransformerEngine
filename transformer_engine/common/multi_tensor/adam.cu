@@ -19,7 +19,6 @@ namespace multi_tensor_adam {
 
 #define BLOCK_SIZE 512
 #define ILP 4
-#define THREADS_PER_WARP 32
 
 typedef enum {
   ADAM_MODE_0 = 0,  // L2 regularization mode

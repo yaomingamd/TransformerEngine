@@ -9,6 +9,7 @@
 #include <cuda_bf16.h>
 
 #include "../common.h"
+#include "../utils.cuh"
 #include "transformer_engine/fused_attn.h"
 
 namespace transformer_engine {
@@ -118,9 +119,10 @@ __global__ void thd_read_half_tensor_kernel(void *half, void *tensor, int *cu_se
   }
   __syncthreads();
 
-  int warpid = (blockIdx.x * blockDim.x + threadIdx.x) / 32;
-  int laneid = threadIdx.x % 32;
-  int num_warps = (blockDim.x * gridDim.x) / 32;
+  const int threads_per_warp = static_cast<int>(::THREADS_PER_WARP);
+  int warpid = (blockIdx.x * blockDim.x + threadIdx.x) / threads_per_warp;
+  int laneid = threadIdx.x % threads_per_warp;
+  int num_warps = (blockDim.x * gridDim.x) / threads_per_warp;
   int num_total_tokens = cu_seqlens_s[batch];
   int num_float4s_per_token = hidden_size_in_bytes / sizeof(float4);
 
@@ -332,7 +334,8 @@ void thd_read_half_tensor(const Tensor &tensor, const Tensor &cu_seqlens, Tensor
 
   // Launch Kernel
   constexpr unsigned int block = 256;
-  unsigned int grid_x = (tensor_shape[seq_dim] / 2 * 32 + block - 1) / block;
+  constexpr unsigned int k_group_threads = static_cast<unsigned>(::THREADS_PER_WARP);
+  unsigned int grid_x = (tensor_shape[seq_dim] / 2 * k_group_threads + block - 1) / block;
   unsigned int grid_y = 1;
   for (int i = 0; i < seq_dim; i++) {
     grid_y *= tensor_shape[i];
@@ -592,11 +595,12 @@ static void thd_grad_correction_helper(Tensor grad, const Tensor &grad_per_step,
   NVTE_CHECK(((hidden_size * typeToNumBits(grad.dtype())) / 8) % 16 == 0);
 
   constexpr unsigned int block = 256;
+  constexpr unsigned int k_group_threads = static_cast<unsigned>(::THREADS_PER_WARP);
   unsigned int grid_x;
   if constexpr (functor_idx < 2) {
-    grid_x = (total_tokens / 2 * 32 + block - 1) / block;
+    grid_x = (total_tokens / 2 * k_group_threads + block - 1) / block;
   } else {
-    grid_x = (total_tokens * 32 + block - 1) / block;
+    grid_x = (total_tokens * k_group_threads + block - 1) / block;
   }
   unsigned int grid_y = 1;
   for (int i = 0; i < seq_dim; i++) {
@@ -604,7 +608,8 @@ static void thd_grad_correction_helper(Tensor grad, const Tensor &grad_per_step,
   }
   dim3 grid = {grid_x, grid_y};
 
-  thd_grad_correction_kernel<dtype, Functor_0, Functor_1, functor_idx, 32>
+  thd_grad_correction_kernel<dtype, Functor_0, Functor_1, functor_idx,
+                             static_cast<int>(::THREADS_PER_WARP)>
       <<<grid, block, sizeof(int) * (batch + 1), stream>>>(
           reinterpret_cast<dtype *>(grad.data.dptr),
           reinterpret_cast<dtype *>(grad_per_step.data.dptr),

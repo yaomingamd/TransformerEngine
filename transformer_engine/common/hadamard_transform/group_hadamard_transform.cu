@@ -36,7 +36,7 @@ struct MultiAmaxArgs {
   int num_tensors;
 };
 
-constexpr int kThreadsPerWarp = 32;
+constexpr int kThreadsPerWarp = static_cast<int>(::THREADS_PER_WARP);
 
 template <typename IType, int kHadamardDimension, int BUFF_DIM_Y, int BUFF_DIM_X,
           bool kReturnPreRhtAmax, bool kReturnIdentityAmax, bool kReturnTransposedAmax>
@@ -127,15 +127,15 @@ __device__ __forceinline__ void ReduceMax(const float pre_rht_amax, const float 
                                           float* output_identity_amax_ptr,
                                           float* output_transpose_amax_ptr, const int warpid) {
   // intra-warp reduction
-  constexpr int kWarpSize = 32;
-  int local_rank = threadIdx.x % 32;
+  constexpr int kWarpSize = kThreadsPerWarp;
+  int local_rank = threadIdx.x % kThreadsPerWarp;
   float warp_pre_rht_amax = kReturnPreRhtAmax ? warp_reduce_max<kWarpSize>(pre_rht_amax) : 0.0f;
   float warp_identity_amax = kReturnIdentityAmax ? warp_reduce_max<kWarpSize>(identity_amax) : 0.0f;
   float warp_transpose_amax =
       kReturnTransposedAmax ? warp_reduce_max<kWarpSize>(transpose_amax) : 0.0f;
 
   // inter-warp reduction
-  if (threadIdx.x % 32 == 0) {
+  if (threadIdx.x % kThreadsPerWarp == 0) {
     if (kReturnPreRhtAmax) {
       staging_for_pre_rht[warpid] = warp_pre_rht_amax;
     }

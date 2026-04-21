@@ -470,7 +470,8 @@ void fused_rope_forward_launcher(const scalar_t *input, const int *cu_seqlens, c
                                  cudaStream_t stream) {
   int warps_per_block = h < 16 ? 4 : 8;
   dim3 blocks(s, b);
-  dim3 threads(THREADS_PER_WARP, warps_per_block);
+  const int threads_per_warp = static_cast<int>(::THREADS_PER_WARP);
+  dim3 threads(threads_per_warp, warps_per_block);
   const int shared_mem_size = 2 * d2 * sizeof(float);  // cos, sin
   int o_stride_s_or_t, o_stride_b;
   if (qkv_format == NVTE_QKV_Format::NVTE_THD) {
@@ -504,7 +505,8 @@ void fused_rope_backward_launcher(const scalar_t *output_grads, const int *cu_se
                                   const int stride_d, cudaStream_t stream) {
   int warps_per_block = h < 16 ? 4 : 8;
   dim3 blocks(s, b);
-  dim3 threads(THREADS_PER_WARP, warps_per_block);
+  const int threads_per_warp = static_cast<int>(::THREADS_PER_WARP);
+  dim3 threads(threads_per_warp, warps_per_block);
   const int shared_mem_size = 2 * d2 * sizeof(float);  // cos, sin
   int o_stride_s_or_t, o_stride_b;
   if (qkv_format == NVTE_QKV_Format::NVTE_THD) {
@@ -537,10 +539,10 @@ void fused_qkv_rope_forward_launcher(const scalar_t *qkv_input, const float *q_f
                                      const int h, const int d, const int d2,
                                      const int qkv_split_arg_list_0, const int qkv_split_arg_list_1,
                                      const int qkv_split_arg_list_2, cudaStream_t stream) {
-  const int THREADS_PER_WARP = 32;
+  const int threads_per_warp = static_cast<int>(::THREADS_PER_WARP);
   int warps_per_block = (h <= 8) ? h : 8;
   dim3 blocks(s, b);
-  dim3 threads(THREADS_PER_WARP, warps_per_block);
+  dim3 threads(threads_per_warp, warps_per_block);
   const int shared_mem_size = 4 * d2 * sizeof(float);  // cos, sin * q ,k
 
   fused_qkv_rope_forward_kernel<<<blocks, threads, shared_mem_size, stream>>>(
@@ -560,10 +562,10 @@ void fused_qkv_rope_backward_launcher(const scalar_t *q_grad_out, const scalar_t
                                       const int qkv_split_arg_list_0,
                                       const int qkv_split_arg_list_1,
                                       const int qkv_split_arg_list_2, cudaStream_t stream) {
-  const int THREADS_PER_WARP = 32;
+  const int threads_per_warp = static_cast<int>(::THREADS_PER_WARP);
   const int warps_per_block = (h <= 8) ? h : 8;
   dim3 blocks(s, b);
-  dim3 threads(THREADS_PER_WARP, warps_per_block);
+  dim3 threads(threads_per_warp, warps_per_block);
   const int shared_mem_size = 4 * d2 * sizeof(float);  // cos, sin * q ,k
 
   fused_qkv_rope_backward_kernel<<<blocks, threads, shared_mem_size, stream>>>(

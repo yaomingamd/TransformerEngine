@@ -26,7 +26,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
                                                   const size_t amax_stride_w, const size_t h,
                                                   const size_t w, const size_t start_offset,
                                                   const size_t len) {
-  constexpr int kThreadsPerWarp = 32;
+  constexpr int kThreadsPerWarp = static_cast<int>(::THREADS_PER_WARP);
   constexpr int kLoopsPerRow = kTileDim / kThreadsPerWarp;
   constexpr int kNumWarps = kThreadsPerBlock / kThreadsPerWarp;
   constexpr int kLoopsPerCol = kTileDim / kNumWarps;
@@ -91,7 +91,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
 
   static_assert(sizeof(OType) == 1);
   constexpr int kNumOutputElemsPerBank = 4 / sizeof(OType);
-  constexpr int kThreadsPerWarp = 32;
+  constexpr int kThreadsPerWarp = static_cast<int>(::THREADS_PER_WARP);
   constexpr int kLoopsPerRow = kTileDim / kThreadsPerWarp;
   constexpr int kNumWarps = kThreadsPerBlock / kThreadsPerWarp;
   constexpr int kRowsPerWarp = kTileDim / kNumWarps;

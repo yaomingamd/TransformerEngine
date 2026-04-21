@@ -24,7 +24,7 @@ struct Kernel_traits_base {
 
   enum { HIDDEN_SIZE = HIDDEN_SIZE_ };
   enum { THREADS_PER_CTA = THREADS_PER_CTA_ };
-  enum { THREADS_PER_WARP = 32 };
+  enum { THREADS_PER_WARP = static_cast<int>(::THREADS_PER_WARP) };
 };
 
 template <uint32_t HIDDEN_SIZE_, typename weight_t_, typename input_t_, typename output_t_,
@@ -69,7 +69,7 @@ template <typename weight_t_, typename input_t_, typename output_t_, typename co
           uint32_t WARPS_N_, uint32_t BYTES_PER_LDG_ = 16,
           typename Base =
               Kernel_traits_base<HIDDEN_SIZE_, weight_t_, input_t_, output_t_, compute_t_, index_t_,
-                                 WARPS_M_ * WARPS_N_ * THREADS_PER_WARP> >
+                                 WARPS_M_ * WARPS_N_ * static_cast<uint32_t>(::THREADS_PER_WARP)> >
 struct Kernel_traits : public Base {
   using input_t = typename Base::input_t;
   using weight_t = typename Base::weight_t;

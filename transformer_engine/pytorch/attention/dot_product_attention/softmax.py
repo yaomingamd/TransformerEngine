@@ -7,11 +7,12 @@ import os
 from typing import Callable, Tuple, Union, Optional
 import torch
 from torch import nn
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 import transformer_engine_torch as tex
 from transformer_engine.pytorch.export import is_in_onnx_export_mode
 
 
-THREADS_PER_WARP = 32
+THREADS_PER_WARP = 64 if IS_HIP_EXTENSION else 32
 THREADS_PER_BLOCK = 128
 
 

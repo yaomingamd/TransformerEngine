@@ -18,6 +18,16 @@ from .misc import get_padded_spec, check_valid_batch_dims
 from ..softmax import SoftmaxFusionType
 
 
+def _threads_per_warp() -> int:
+    """Match device warp / wavefront width (64 on AMD ROCm, 32 on NVIDIA CUDA)."""
+    try:
+        from torch.utils.cpp_extension import IS_HIP_EXTENSION
+
+        return 64 if IS_HIP_EXTENSION else 32
+    except ImportError:
+        return 32
+
+
 __all__ = [
     "scaled_softmax_fwd",
     "scaled_softmax_bwd",
@@ -80,7 +90,7 @@ class SoftmaxPrimitive(BasePrimitive):
     @staticmethod
     def get_batch_per_block(k_seqlen: int) -> int:
         """Get batch per CTA in Softmax kernels"""
-        threads_per_warp = 32
+        threads_per_warp = _threads_per_warp()
         threads_per_block = 128  # Depends on the kernel implmentation
 
         pow2 = 1 << (k_seqlen - 1).bit_length()

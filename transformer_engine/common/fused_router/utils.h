@@ -24,7 +24,11 @@ __device__ inline void __syncwarp()
 }
 
 #endif
+#ifdef __HIP_PLATFORM_AMD__
+constexpr size_t kThreadsPerWarp = 64;
+#else
 constexpr size_t kThreadsPerWarp = 32;
+#endif
 constexpr int kThreadsPerBlock =
     128;  // Using 4 warps in 1 CTA, Each warp is responsible for 1 token.
 constexpr float epsilon = 1e-20;

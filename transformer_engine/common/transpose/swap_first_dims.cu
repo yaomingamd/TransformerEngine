@@ -64,8 +64,12 @@ struct KernelConfig {
       single_load_store = false;
     }
 
-    // SM occupancy
+    // SM occupancy (match hardware warp / wavefront width)
+#ifdef __HIP_PLATFORM_AMD__
+    constexpr size_t warp_size = 64;
+#else
     constexpr size_t warp_size = 32;
+#endif
     constexpr size_t warps_per_sm = 16;  // Rough estimate for saturated SMs
     active_sm_count = std::min(DIVUP(num_blocks * block_size / warp_size, warps_per_sm), sm_count);
 

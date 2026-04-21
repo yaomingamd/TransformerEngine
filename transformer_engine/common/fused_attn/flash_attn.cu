@@ -5,12 +5,13 @@
  ************************************************************************/
 
 #include "../common.h"
+#include "../utils.cuh"
 #include "transformer_engine/fused_attn.h"
 
 namespace transformer_engine {
 namespace flash_attention {
 
-constexpr int warp_size = 32;
+constexpr int warp_size = static_cast<int>(::THREADS_PER_WARP);
 constexpr int type_size = 2;  // FP16 or BF16
 constexpr int nvec = sizeof(uint64_t) / type_size;
 constexpr int load_size = warp_size * nvec;

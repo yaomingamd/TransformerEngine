@@ -558,7 +558,11 @@ void fillCase(Tensor *t, const InputsFillCase fill_case);
 void setRandomScale(Tensor *t);
 void setRandomScaleInv(Tensor *t);
 
+#ifdef __HIP_PLATFORM_AMD__
+constexpr int THREADS_PER_WARP = 64;
+#else
 constexpr int THREADS_PER_WARP = 32;
+#endif
 
 const std::string &typeName(DType type);
 const std::string& caseName(InputsFillCase type);

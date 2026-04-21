@@ -30,6 +30,14 @@
 #include "common/util/vectorized_pointwise.h"
 #include "userbuffers.h"
 
+namespace {
+#ifdef __HIP_PLATFORM_AMD__
+constexpr int kUserbuffersThreadsPerWarp = 64;
+#else
+constexpr int kUserbuffersThreadsPerWarp = 32;
+#endif
+}  // namespace
+
 #define MAX_THREADS 1024
 
 #ifndef __HIP_PLATFORM_AMD__
@@ -1726,10 +1734,10 @@ void reducescatter2_userbuff_strided(void *output, const int handler, const int 
 
   if (elements < 64) return;
   int sms = ar_nvsize == 1 ? 2 : comm->sms;
-  int warps = comm->threads / 32;
+  int warps = comm->threads / kUserbuffersThreadsPerWarp;
   if (warps < ar_nvsize) warps = ar_nvsize;
 
-  SETUP_LAUNCH_CONFIG(sms, warps * 32, stream);
+  SETUP_LAUNCH_CONFIG(sms, warps * kUserbuffersThreadsPerWarp, stream);
   callranks_rs_oop_stride(2) callranks_rs_oop_stride(4) callranks_rs_oop_stride(8)
       callranks_rs_oop_stride(16) callranks_rs_oop_stride(32)
 }
@@ -1748,10 +1756,10 @@ void reducescatter2_userbuff_strided_atomic(void *output, const int handler, con
 
   if (elements < 64) return;
   int sms = ar_nvsize == 1 ? 2 : comm->sms;
-  int warps = comm->threads / 32;
+  int warps = comm->threads / kUserbuffersThreadsPerWarp;
   if (warps < ar_nvsize) warps = ar_nvsize;
 
-  SETUP_LAUNCH_CONFIG(sms, warps * 32, stream);
+  SETUP_LAUNCH_CONFIG(sms, warps * kUserbuffersThreadsPerWarp, stream);
   callranks_rs_oop_stride_atomic(2) callranks_rs_oop_stride_atomic(4)
       callranks_rs_oop_stride_atomic(8) callranks_rs_oop_stride_atomic(16)
           callranks_rs_oop_stride_atomic(32)
@@ -1775,10 +1783,10 @@ void reducescatter2_userbuff_strided_universal_fp8(void *output, float *scale, c
   assert(comm->sm_arch >= 9);
   if (elements < 128) return;
   int sms = ar_nvsize == 1 ? 2 : comm->sms;
-  int warps = comm->threads / 32;
+  int warps = comm->threads / kUserbuffersThreadsPerWarp;
   if (warps < ar_nvsize) warps = ar_nvsize;
 
-  SETUP_LAUNCH_CONFIG(sms, warps * 32, stream);
+  SETUP_LAUNCH_CONFIG(sms, warps * kUserbuffersThreadsPerWarp, stream);
   callranks_rs_oop_atomic_fp8(2) callranks_rs_oop_atomic_fp8(4) callranks_rs_oop_atomic_fp8(8)
       callranks_rs_oop_atomic_fp8(16) callranks_rs_oop_atomic_fp8(32)
 }
@@ -1820,10 +1828,10 @@ void reducescatter2_userbuff_strided_multiatomic(void *output, const int handler
 
   if (elements < 64) return;
   int sms = ar_nvsize == 1 ? 2 : comm->sms;
-  int warps = comm->threads / 32;
+  int warps = comm->threads / kUserbuffersThreadsPerWarp;
   if (warps < ar_nvsize) warps = ar_nvsize;
 
-  SETUP_LAUNCH_CONFIG(sms, warps * 32, stream);
+  SETUP_LAUNCH_CONFIG(sms, warps * kUserbuffersThreadsPerWarp, stream);
   callranks_rs_oop_stride_multiatomic(2) callranks_rs_oop_stride_multiatomic(4)
       callranks_rs_oop_stride_multiatomic(8) callranks_rs_oop_stride_multiatomic(16)
           callranks_rs_oop_stride_multiatomic(32)
@@ -1841,18 +1849,18 @@ void allgather2_userbuff_inplace(const int handler, const int offset, const int 
 
   if (elements < 64) return;
   int sms = ar_nvsize == 1 ? 2 : comm->sms;
-  int warps = comm->threads / 32;
+  int warps = comm->threads / kUserbuffersThreadsPerWarp;
   if (warps < ar_nvsize) warps = ar_nvsize;
 
   if (comm_launch_event) {
-    SETUP_LAUNCH_CONFIG_WITH_COMPLETION_EVENT(sms, warps * 32, stream, comm_launch_event);
+    SETUP_LAUNCH_CONFIG_WITH_COMPLETION_EVENT(sms, warps * kUserbuffersThreadsPerWarp, stream, comm_launch_event);
     if (comm->use_mc && (comm->memflags[handler] & NVTE_UB_MEM_MC_CREATED)) {
       callranks_agMC(2) callranks_agMC(4) callranks_agMC(8) callranks_agMC(16) callranks_agMC(32)
     } else {
       callranks_ag(2) callranks_ag(4) callranks_ag(8) callranks_ag(16) callranks_ag(32)
     }
   } else {
-    SETUP_LAUNCH_CONFIG(sms, warps * 32, stream);
+    SETUP_LAUNCH_CONFIG(sms, warps * kUserbuffersThreadsPerWarp, stream);
     if (comm->use_mc && (comm->memflags[handler] & NVTE_UB_MEM_MC_CREATED)) {
       callranks_agMC(2) callranks_agMC(4) callranks_agMC(8) callranks_agMC(16) callranks_agMC(32)
     } else {
@@ -1888,18 +1896,18 @@ void reducescatter2_userbuff_inplace(const int handler, const int offset, const 
 
   if (elements < 64) return;
   int sms = ar_nvsize == 1 ? 2 : comm->sms;
-  int warps = comm->threads / 32;
+  int warps = comm->threads / kUserbuffersThreadsPerWarp;
   if (warps < ar_nvsize) warps = ar_nvsize;
 
   if (comm_launch_event) {
-    SETUP_LAUNCH_CONFIG_WITH_COMPLETION_EVENT(sms, warps * 32, stream, comm_launch_event);
+    SETUP_LAUNCH_CONFIG_WITH_COMPLETION_EVENT(sms, warps * kUserbuffersThreadsPerWarp, stream, comm_launch_event);
     if (comm->use_mc && (comm->memflags[handler] & NVTE_UB_MEM_MC_CREATED)) {
       callranks_rsMC(2) callranks_rsMC(4) callranks_rsMC(8) callranks_rsMC(16) callranks_rsMC(32)
     } else {
       callranks_rs(2) callranks_rs(4) callranks_rs(8) callranks_rs(16) callranks_rs(32)
     }
   } else {
-    SETUP_LAUNCH_CONFIG(sms, warps * 32, stream);
+    SETUP_LAUNCH_CONFIG(sms, warps * kUserbuffersThreadsPerWarp, stream);
     if (comm->use_mc && (comm->memflags[handler] & NVTE_UB_MEM_MC_CREATED)) {
       callranks_rsMC(2) callranks_rsMC(4) callranks_rsMC(8) callranks_rsMC(16) callranks_rsMC(32)
     } else {
@@ -1921,11 +1929,11 @@ void reducescatter2_userbuff_stridedoutput(void *output, const int handler, cons
 
   if (elements < 64) return;
   int sms = ar_nvsize == 1 ? 2 : comm->sms;
-  int warps = comm->threads / 32;
+  int warps = comm->threads / kUserbuffersThreadsPerWarp;
   if (warps < ar_nvsize) warps = ar_nvsize;
 
   if (comm_launch_event) {
-    SETUP_LAUNCH_CONFIG_WITH_COMPLETION_EVENT(sms, warps * 32, stream, comm_launch_event);
+    SETUP_LAUNCH_CONFIG_WITH_COMPLETION_EVENT(sms, warps * kUserbuffersThreadsPerWarp, stream, comm_launch_event);
     if (comm->use_mc && (comm->memflags[handler] & NVTE_UB_MEM_MC_CREATED)) {
       callranks_rs_oopMC(2) callranks_rs_oopMC(4) callranks_rs_oopMC(8) callranks_rs_oopMC(16)
           callranks_rs_oopMC(32)
@@ -1934,7 +1942,7 @@ void reducescatter2_userbuff_stridedoutput(void *output, const int handler, cons
           callranks_rs_oop(32)
     }
   } else {
-    SETUP_LAUNCH_CONFIG(sms, warps * 32, stream);
+    SETUP_LAUNCH_CONFIG(sms, warps * kUserbuffersThreadsPerWarp, stream);
     if (comm->use_mc && (comm->memflags[handler] & NVTE_UB_MEM_MC_CREATED)) {
       callranks_rs_oopMC(2) callranks_rs_oopMC(4) callranks_rs_oopMC(8) callranks_rs_oopMC(16)
           callranks_rs_oopMC(32)
@@ -1967,15 +1975,15 @@ void reducescatter2_userbuff_stridedoutput_fp8(void *output, float *scale, const
   assert(comm->sm_arch >= 9);
   if (elements < 128) return;
   int sms = ar_nvsize == 1 ? 2 : comm->sms;
-  int warps = comm->threads / 32;
+  int warps = comm->threads / kUserbuffersThreadsPerWarp;
   if (warps < ar_nvsize) warps = ar_nvsize;
 
   if (comm_launch_event) {
-    SETUP_LAUNCH_CONFIG_WITH_COMPLETION_EVENT(sms, warps * 32, stream, comm_launch_event);
+    SETUP_LAUNCH_CONFIG_WITH_COMPLETION_EVENT(sms, warps * kUserbuffersThreadsPerWarp, stream, comm_launch_event);
     callranks_rs_oop_fp8(2) callranks_rs_oop_fp8(4) callranks_rs_oop_fp8(8) callranks_rs_oop_fp8(16)
         callranks_rs_oop_fp8(32)
   } else {
-    SETUP_LAUNCH_CONFIG(sms, warps * 32, stream);
+    SETUP_LAUNCH_CONFIG(sms, warps * kUserbuffersThreadsPerWarp, stream);
     callranks_rs_oop_fp8(2) callranks_rs_oop_fp8(4) callranks_rs_oop_fp8(8) callranks_rs_oop_fp8(16)
         callranks_rs_oop_fp8(32)
   }

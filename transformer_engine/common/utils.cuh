@@ -49,7 +49,12 @@ static_assert(sizeof(uint64_t) == 8);
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
+// AMD GPUs use a 64-thread wavefront; NVIDIA uses 32-thread warps.
+#ifdef __HIP_PLATFORM_AMD__
+constexpr uint32_t THREADS_PER_WARP = 64;
+#else
 constexpr uint32_t THREADS_PER_WARP = 32;
+#endif
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -528,7 +533,7 @@ struct Reducer<T, 1, WARPS_M, 1> {
   enum { SMEM_BYTES = 0 };
   enum { WORKSPACE_BYTES_PER_GROUP = 0 };
 
-  enum { THREADS_PER_WARP = 32 };
+  enum { THREADS_PER_WARP = static_cast<int>(::THREADS_PER_WARP) };
 
   template <typename Params>
   inline __device__ Reducer(const Params &params, uint32_t bidm, uint32_t bidn, uint32_t warp_m,
@@ -573,7 +578,7 @@ struct Reducer<T, 1, WARPS_M, WARPS_N> : public Reducer<T, 1, WARPS_M, 1> {
   enum { SMEM_BYTES = Base::SMEM_BYTES + WARPS_M * WARPS_N * sizeof(T) * 2 };
   enum { WORKSPACE_BYTES_PER_GROUP = 0 };
 
-  enum { THREADS_PER_WARP = 32 };
+  enum { THREADS_PER_WARP = Base::THREADS_PER_WARP };
 
   template <typename Params>
   inline __device__ Reducer(const Params &params, uint32_t bidm, uint32_t bidn, uint32_t warp_m,
@@ -941,10 +946,10 @@ __forceinline__ __device__ float warp_reduce_max_broadcast(const float val) {
 template <int num_warps, typename compute_t>
 __device__ __forceinline__ compute_t reduce_max(const compute_t m, const int warpid) {
   __shared__ float staging[num_warps];
-  constexpr int warp_size = 32;
+  constexpr int warp_size = static_cast<int>(::THREADS_PER_WARP);
   const float my_max = m;
   const float my_warp_max = warp_reduce_max<warp_size>(my_max);
-  if (threadIdx.x % 32 == 0) {
+  if (threadIdx.x % warp_size == 0) {
     staging[warpid] = my_warp_max;
   }
   __syncthreads();
