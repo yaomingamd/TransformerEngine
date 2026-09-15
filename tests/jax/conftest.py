@@ -8,6 +8,8 @@ import pytest
 from collections import defaultdict
 import time
 
+# Preload JAX/ROCm runtime before TE native libraries (libroctx, etc.).
+_ = jax.devices()
 
 import transformer_engine.jax
 from transformer_engine_jax import get_device_compute_capability

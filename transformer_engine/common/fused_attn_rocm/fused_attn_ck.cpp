@@ -205,6 +205,55 @@ ck_fused_attn::MaskType set_ck_mask(NVTE_Mask_Type nvte_mask_type, int64_t nvte_
   return ck_fused_attn::MaskType::window_generic;
 }
 
+bool is_nvte_causal_mask(NVTE_Mask_Type mask_type) {
+  return (mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK ||
+          mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK ||
+          mask_type == NVTE_Mask_Type::NVTE_CAUSAL_BOTTOM_RIGHT_MASK ||
+          mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK);
+}
+
+// gfx950 hd256 ASM: bf16 group kernels (fwd: causal + non-causal; bwd: non-causal a16).
+void adjust_hd256_asm_v3_fwd_flags(
+    uint64_t h, uint64_t hg, uint64_t d_qk, uint64_t d_v, DType dtype,
+    NVTE_Mask_Type mask_type, bool& uses_fwd_v3) {
+  if (d_qk != 256 || d_v != 256 || !uses_fwd_v3) {
+    return;
+  }
+  if (dtype != DType::kBFloat16) {
+    uses_fwd_v3 = false;
+    return;
+  }
+  // Kernel indexes K/V by h_q; GQA/MQA must fall back to CK.
+  if (h != hg) {
+    uses_fwd_v3 = false;
+    return;
+  }
+  const bool is_causal = is_nvte_causal_mask(mask_type);
+  const bool is_non_causal =
+      (mask_type == NVTE_Mask_Type::NVTE_NO_MASK ||
+       mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK);
+  if (!is_causal && !is_non_causal) {
+    uses_fwd_v3 = false;
+  }
+}
+
+void adjust_hd256_asm_v3_bwd_flags(
+    uint64_t h, uint64_t hg, uint64_t d_qk, uint64_t d_v, DType dtype,
+    NVTE_Mask_Type mask_type, bool& uses_bwd_v3, bool& is_v3_atomic_fp32) {
+  if (d_qk != 256 || d_v != 256) {
+    return;
+  }
+  if (dtype != DType::kBFloat16 || is_nvte_causal_mask(mask_type)) {
+    uses_bwd_v3 = false;
+    return;
+  }
+  if (h != hg) {
+    uses_bwd_v3 = false;
+    return;
+  }
+  is_v3_atomic_fp32 = false;
+}
+
 __global__
 void generate_cu_seqlen_padded_kernel(
   uint32_t s_q, uint32_t s_kv, uint32_t b,
@@ -578,6 +627,7 @@ void fused_attn_ck_fwd_impl(
   bool nvte_ck_uses_fwd_v3 = getenv<int>("NVTE_CK_USES_FWD_V3", 1);
   int nvte_ck_how_v3_bf16_cvt = getenv<int>("NVTE_CK_HOW_V3_BF16_CVT", 1);
   bool nvte_ck_zero_out_pad = getenv<int>("NVTE_CK_ZERO_OUT_PAD", 1);
+  adjust_hd256_asm_v3_fwd_flags(h, hg, d_qk, d_v, dtype, mask_type, nvte_ck_uses_fwd_v3);
   NVTE_QKV_Format qkv_format = nvte_get_qkv_format(layout);
   bool is_ragged = qkv_format==NVTE_QKV_Format::NVTE_THD;
   bool is_SBHD = qkv_format==NVTE_QKV_Format::NVTE_SBHD || qkv_format==NVTE_QKV_Format::NVTE_SBHD_2BSHD;
@@ -860,6 +910,8 @@ void fused_attn_ck_bwd_impl(
   bool nvte_ck_uses_bwd_v3 = getenv<int>("NVTE_CK_USES_BWD_V3", 1);
   bool nvte_ck_is_v3_atomic_fp32 = getenv<int>("NVTE_CK_IS_V3_ATOMIC_FP32", 1);
   int nvte_ck_how_v3_bf16_cvt = getenv<int>("NVTE_CK_HOW_V3_BF16_CVT", 1);
+  adjust_hd256_asm_v3_bwd_flags(h, hg, d_qk, d_v, dtype, mask_type, nvte_ck_uses_bwd_v3,
+                                nvte_ck_is_v3_atomic_fp32);
 
   bool is_mqa_gqa = (h > hg);
 

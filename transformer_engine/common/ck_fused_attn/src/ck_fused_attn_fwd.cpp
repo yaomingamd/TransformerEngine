@@ -253,7 +253,7 @@ hipError_t _ck_attn_fwd_impl(
   fmha_args.is_group_mode   = is_group_mode;
   fmha_args.bias_type       = static_cast<int>(bias_type);
   fmha_args.has_lse         = lse_ptr!=nullptr;
-  fmha_args.qscale_type     = static_cast<int>(quant_scale_enum::no_scale);
+  fmha_args.qscale_type     = 0;  // quant_scale_enum::no_scale
   fmha_args.has_sink        = false;
   fmha_args.q_descale_ptr    = nullptr;
   fmha_args.k_descale_ptr    = nullptr;

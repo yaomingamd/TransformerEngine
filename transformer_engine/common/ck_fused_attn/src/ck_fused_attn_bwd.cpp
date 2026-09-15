@@ -6,9 +6,12 @@
 
 #include <iostream>
 #include <cstdlib>
+#include <memory>
 #include <stdexcept>
 #include <type_traits>
+#include <vector>
 #include "ck_fused_attn/ck_fused_attn.hpp"
+#include "ck_tile/host/pinned_host_releaser.hpp"
 #include "mha_bwd.h"
 #include "ck_fused_attn_utils.hpp"
 
@@ -365,7 +368,8 @@ void log_bwd_config(const char* func_name, const aiter::mha_bwd_args& fmha_args)
   log_value(log_file, "dk_ptr", fmha_args.dk_ptr);
   log_value(log_file, "dv_ptr", fmha_args.dv_ptr);
   log_value(log_file, "dbias_ptr", fmha_args.dbias_ptr);
-  log_value(log_file, "dq_acc_ptr", fmha_args.dq_acc_ptr);
+  log_value(log_file, "sink_ptr", fmha_args.sink_ptr);
+  log_value(log_file, "d_sink_ptr", fmha_args.d_sink_ptr);
 
   log_value(log_file, "seqstart_q_ptr", fmha_args.seqstart_q_ptr);
   log_value(log_file, "seqstart_k_ptr", fmha_args.seqstart_k_ptr);
@@ -390,7 +394,6 @@ void log_bwd_config(const char* func_name, const aiter::mha_bwd_args& fmha_args)
   log_value(log_file, "stride_o", fmha_args.stride_o);
   log_value(log_file, "stride_randval", fmha_args.stride_randval);
   log_value(log_file, "stride_do", fmha_args.stride_do);
-  log_value(log_file, "stride_dq_acc", fmha_args.stride_dq_acc);
   log_value(log_file, "stride_dq", fmha_args.stride_dq);
   log_value(log_file, "stride_dk", fmha_args.stride_dk);
   log_value(log_file, "stride_dv", fmha_args.stride_dv);
@@ -403,7 +406,6 @@ void log_bwd_config(const char* func_name, const aiter::mha_bwd_args& fmha_args)
   log_value(log_file, "nhead_stride_randval", fmha_args.nhead_stride_randval);
   log_value(log_file, "nhead_stride_do", fmha_args.nhead_stride_do);
   log_value(log_file, "nhead_stride_lsed", fmha_args.nhead_stride_lsed);
-  log_value(log_file, "nhead_stride_dq_acc", fmha_args.nhead_stride_dq_acc);
   log_value(log_file, "nhead_stride_dq", fmha_args.nhead_stride_dq);
   log_value(log_file, "nhead_stride_dk", fmha_args.nhead_stride_dk);
   log_value(log_file, "nhead_stride_dv", fmha_args.nhead_stride_dv);
@@ -416,7 +418,6 @@ void log_bwd_config(const char* func_name, const aiter::mha_bwd_args& fmha_args)
   log_value(log_file, "batch_stride_randval", fmha_args.batch_stride_randval);
   log_value(log_file, "batch_stride_do", fmha_args.batch_stride_do);
   log_value(log_file, "batch_stride_lsed", fmha_args.batch_stride_lsed);
-  log_value(log_file, "batch_stride_dq_acc", fmha_args.batch_stride_dq_acc);
   log_value(log_file, "batch_stride_dq", fmha_args.batch_stride_dq);
   log_value(log_file, "batch_stride_dk", fmha_args.batch_stride_dk);
   log_value(log_file, "batch_stride_dv", fmha_args.batch_stride_dv);
@@ -493,6 +494,7 @@ hipError_t _ck_attn_bwd_impl(
   bool has_dropout = (dropout_probability > 0.f);
   bool has_dbias = dbias_ptr != nullptr;
   bool is_mqa_gqa = (h > hg);
+  (void)dq_acc_ptr;
 
   /* CK input parameters */
   ck_tile::index_t batch = b;
@@ -559,7 +561,8 @@ hipError_t _ck_attn_bwd_impl(
   fmha_args.dbias_ptr = ((!is_group_mode) && has_dbias)
                           ? (bias_shape==BiasShape::kBHSS ? dbias_ptr: dbias_expanded_ptr)
                           : nullptr;
-  fmha_args.dq_acc_ptr = dq_acc_ptr;
+  fmha_args.sink_ptr = nullptr;
+  fmha_args.d_sink_ptr = nullptr;
 
   if (is_group_mode) {
     fmha_args.seqstart_q_ptr = cu_seqlen_q_padded_ptr==nullptr? cu_seqlen_q_ptr: cu_seqlen_q_padded_ptr;
@@ -577,8 +580,8 @@ hipError_t _ck_attn_bwd_impl(
     fmha_args.cu_seqlen_k_ptr = nullptr;
   }
 
-  fmha_args.seqlen_q = is_group_mode ? max_seqlen_q : seqlen_q;
-  fmha_args.seqlen_k = is_group_mode ? max_seqlen_k : seqlen_k;
+  fmha_args.seqlen_q = is_group_mode ? static_cast<ck_tile::index_t>(max_tokens_q) : seqlen_q;
+  fmha_args.seqlen_k = is_group_mode ? static_cast<ck_tile::index_t>(max_tokens_kv) : seqlen_k;
   fmha_args.batch = batch;
   fmha_args.max_seqlen_q = max_seqlen_q;
   fmha_args.max_seqlen_k = max_seqlen_k;
@@ -595,8 +598,6 @@ hipError_t _ck_attn_bwd_impl(
   fmha_args.stride_o = stride_s_o;
   fmha_args.stride_randval = max_seqlen_k;
   fmha_args.stride_do = stride_s_do;
-  //dq_acc of shape (nsplits, B, H, S, D)
-  fmha_args.stride_dq_acc = d_qk;
   fmha_args.stride_dq = stride_s_dq;
   fmha_args.stride_dk = is_mqa_gqa? stride_s_dk_expanded:stride_s_dk;
   fmha_args.stride_dv = is_mqa_gqa? stride_s_dv_expanded:stride_s_dv;
@@ -614,7 +615,6 @@ hipError_t _ck_attn_bwd_impl(
   fmha_args.nhead_stride_randval = is_group_mode ? 0 : seqlen_q * max_seqlen_k;
   fmha_args.nhead_stride_do = stride_h_do;
   fmha_args.nhead_stride_lsed = is_group_mode ? max_tokens_q : max_seqlen_q;
-  fmha_args.nhead_stride_dq_acc = static_cast<int64_t>((is_group_mode ? max_tokens_q : s_q) * d_qk);
   fmha_args.nhead_stride_dq = stride_h_dq;
   fmha_args.nhead_stride_dk = is_mqa_gqa? stride_h_dk_expanded:stride_h_dk;
   fmha_args.nhead_stride_dv = is_mqa_gqa? stride_h_dv_expanded:stride_h_dv;
@@ -630,13 +630,11 @@ hipError_t _ck_attn_bwd_impl(
   fmha_args.batch_stride_randval = is_group_mode ? 0 : nhead * seqlen_q * max_seqlen_k;
   fmha_args.batch_stride_do = is_group_mode ? 0 : stride_b_do;
   fmha_args.batch_stride_lsed = is_group_mode ? 0 : nhead * max_seqlen_q;
-  fmha_args.batch_stride_dq_acc = is_group_mode ? 0 : static_cast<int64_t>(h * s_q * d_qk);
   fmha_args.batch_stride_dq = is_group_mode ? 0 : stride_b_dq;
   fmha_args.batch_stride_dk = is_group_mode ? 0 : (is_mqa_gqa? stride_b_dk_expanded:stride_b_dk);
   fmha_args.batch_stride_dv = is_group_mode ? 0 : (is_mqa_gqa? stride_b_dv_expanded:stride_b_dv);
   // for dbias, use h since h can be different from bias_h
   fmha_args.batch_stride_dbias = is_group_mode ? 0 : h * max_seqlen_q * max_seqlen_k;
-  fmha_args.split_stride_dq_acc = static_cast<int>(is_group_mode ? (max_tokens_q * h * d_qk) : (b * h * s_q * d_qk));
 
   fmha_args.window_size_left = left;
   fmha_args.window_size_right = right;
@@ -656,11 +654,45 @@ hipError_t _ck_attn_bwd_impl(
     }
   }
 
+  std::vector<void*> mha_bwd_workspaces;
+  fmha_args.workspace_alloc = [&mha_bwd_workspaces, stream](size_t bytes, bool zero_init) -> void* {
+    if(bytes == 0){
+      return nullptr;
+    }
+    void* ptr = nullptr;
+    if(hipMallocAsync(&ptr, bytes, stream) != hipSuccess){
+      throw std::runtime_error("ck_fused_attn bwd: hipMallocAsync failed for AITER workspace.");
+    }
+    if(zero_init){
+      if(hipMemsetAsync(ptr, 0, bytes, stream) != hipSuccess){
+        hipFreeAsync(ptr, stream);
+        throw std::runtime_error("ck_fused_attn bwd: hipMemsetAsync failed for AITER workspace.");
+      }
+    }
+    mha_bwd_workspaces.push_back(ptr);
+    return ptr;
+  };
+  fmha_args.pinned_host_alloc = [](size_t bytes) -> std::shared_ptr<void> {
+    if(bytes == 0){
+      return {};
+    }
+    void* ptr = nullptr;
+    if(hipHostMalloc(&ptr, bytes, hipHostMallocDefault) != hipSuccess){
+      throw std::runtime_error("ck_fused_attn bwd: hipHostMalloc failed for AITER pinned host buffer.");
+    }
+    return std::shared_ptr<void>(ptr, [](void* p){
+      ck_tile::pinned_host_releaser::instance().enqueue(p);
+    });
+  };
+
   // print ck traits and args when needed
   if(ck_log_config){
     log_bwd_config(func_name, fmha_args);
   }
   float average_runtime = aiter::mha_bwd(fmha_args, stream_config);
+  for(void* ws_ptr : mha_bwd_workspaces){
+    hipFreeAsync(ws_ptr, stream);
+  }
   if(average_runtime < 0){
     //TODO: better error out system
     throw std::runtime_error("fused attn configs not supported in ck_fused_attn bwd pass.");

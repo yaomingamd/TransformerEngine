@@ -1814,3 +1814,142 @@ class TestFusedAttnWithDeterminism:
             swa,
             seq_desc_format,
         )
+
+
+@pytest.mark.skipif(not is_hip_extension(), reason="HD256 CK/ASM fused attn is ROCm only")
+@pytest.mark.parametrize(
+    "attn_mask_type",
+    [
+        pytest.param(AttnMaskType.PADDING_MASK, id="PADDING"),
+        pytest.param(AttnMaskType.PADDING_CAUSAL_MASK, id="PADDING_CAUSAL"),
+    ],
+)
+@pytest.mark.parametrize(
+    "softmax_type",
+    [pytest.param(AttnSoftmaxType.VANILLA_SOFTMAX, id="VANILLA_SOFTMAX")],
+)
+@pytest.mark.parametrize(
+    "b, s_q, s_kv, h_q, h_kv, d_qk, d_v, dtype, qkv_layout",
+    [
+        pytest.param(
+            2,
+            512,
+            512,
+            8,
+            8,
+            256,
+            256,
+            jnp.bfloat16,
+            QKVLayout.THD_THD_THD,
+            id="2-512-8-256-BF16-THD-MHA",
+        ),
+    ],
+)
+@pytest.mark.parametrize("dropout_prob", [pytest.param(0.0, id="DROP_0.0")])
+@pytest.mark.parametrize("use_old_rng", [pytest.param(True, id="Old-style rng")])
+@pytest.mark.parametrize("swa", [pytest.param(False, id="NO_SWA")])
+@pytest.mark.parametrize("seq_desc_format", [pytest.param(SeqDescFormat.Seqlens, id="Seqlens")])
+class TestFusedAttnHD256:
+    """gfx950 hd256 bf16 varlen (THD) fused attention — ASM fwd + ASM bwd (non-causal)."""
+
+    @staticmethod
+    @pytest.mark.parametrize(
+        "is_training",
+        [
+            pytest.param(True, id="TRAINING"),
+            pytest.param(False, id="INFERENCE"),
+        ],
+    )
+    @pytest.mark.parametrize(
+        "attn_bias_type, bias_shape",
+        [pytest.param(AttnBiasType.NO_BIAS, None, id="NO_BIAS")],
+    )
+    def test_forward(
+        b,
+        s_q,
+        s_kv,
+        h_q,
+        h_kv,
+        d_qk,
+        d_v,
+        attn_bias_type,
+        attn_mask_type,
+        softmax_type,
+        dropout_prob,
+        use_old_rng,
+        dtype,
+        is_training,
+        qkv_layout,
+        bias_shape,
+        swa,
+        seq_desc_format,
+    ):
+        runner = FusedAttnRunner(
+            b,
+            s_q,
+            s_kv,
+            h_q,
+            h_kv,
+            d_qk,
+            d_v,
+            attn_bias_type,
+            attn_mask_type,
+            softmax_type,
+            dropout_prob,
+            use_old_rng,
+            dtype,
+            is_training,
+            qkv_layout,
+            bias_shape,
+            None,
+            seq_desc_format,
+        )
+        runner.test_forward()
+
+    @staticmethod
+    @pytest.mark.parametrize(
+        "attn_bias_type, bias_shape",
+        [pytest.param(AttnBiasType.NO_BIAS, None, id="NO_BIAS")],
+    )
+    def test_backward(
+        b,
+        s_q,
+        s_kv,
+        h_q,
+        h_kv,
+        d_qk,
+        d_v,
+        attn_bias_type,
+        attn_mask_type,
+        softmax_type,
+        dropout_prob,
+        use_old_rng,
+        dtype,
+        qkv_layout,
+        bias_shape,
+        swa,
+        seq_desc_format,
+    ):
+        if attn_mask_type != AttnMaskType.PADDING_MASK:
+            pytest.skip("hd256 bwd ASM is non-causal only; causal bwd uses CK")
+        runner = FusedAttnRunner(
+            b,
+            s_q,
+            s_kv,
+            h_q,
+            h_kv,
+            d_qk,
+            d_v,
+            attn_bias_type,
+            attn_mask_type,
+            softmax_type,
+            dropout_prob,
+            use_old_rng,
+            dtype,
+            True,
+            qkv_layout,
+            bias_shape,
+            None,
+            seq_desc_format,
+        )
+        runner.test_backward()
