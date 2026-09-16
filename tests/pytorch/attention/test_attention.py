@@ -155,6 +155,54 @@ def test_gqa_mla_thd():
     test_dot_product_attention(dtype, {"layout_1": config}, "layout_1", False, False, qkv_layout, False, True)
 
 
+model_configs_hd256 = {
+    "hd256_padding": ModelConfig(2, 512, 8, 256, attn_mask_type="padding"),
+    "hd256_padding_causal": ModelConfig(2, 512, 8, 256, attn_mask_type="padding_causal"),
+}
+
+
+@pytest.mark.skipif(not IS_HIP_EXTENSION, reason="HD256 CK/ASM fused attn is ROCm only")
+@pytest.mark.parametrize(
+    "model",
+    [
+        pytest.param("hd256_padding", id="PADDING"),
+        pytest.param("hd256_padding_causal", id="PADDING_CAUSAL"),
+    ],
+)
+def test_fused_attn_hd256(model):
+    """gfx950 hd256 bf16 varlen (THD) fused attention — shared CK/ASM path with JAX."""
+    if not is_bf16_available():
+        pytest.skip("bf16 required")
+    os.environ["NVTE_FUSED_ATTN_CK"] = "1"
+    os.environ["NVTE_FUSED_ATTN_AOTRITON"] = "0"
+    os.environ["NVTE_CK_USES_FWD_V3"] = "1"
+    os.environ["NVTE_CK_USES_BWD_V3"] = "1"
+    os.environ["NVTE_CK_IS_V3_ATOMIC_FP32"] = "0"
+    _attention_backends["backend_selection_requires_update"] = True
+
+    config = model_configs_hd256[model]
+    _, _, fused_attn_backends = get_available_attention_backends(
+        config,
+        qkv_dtype=torch.bfloat16,
+        qkv_layout="thd_thd_thd",
+        pad_between_seqs=True,
+        is_training=model == "hd256_padding",
+    )
+    if FusedAttnBackend["CK"] not in fused_attn_backends:
+        pytest.skip("CK fused attention backend required for hd256")
+
+    test_dot_product_attention(
+        torch.bfloat16,
+        model_configs_hd256,
+        model,
+        False,
+        False,
+        "thd_thd_thd",
+        False,
+        True,
+    )
+
+
 @pytest.mark.skipif(not IS_HIP_EXTENSION, reason="ROCm TE specific pytests.")
 def test_dot_product_mem_calc():
     """Non-regression test for memory workspace calculation integer overflow issue."""

@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# Quick resume for TE_HD256 gfx950 hd256 ASM work (ym_hd256 on mi355-gpu-058).
+set -euo pipefail
+
+TE_DIR="${TE_DIR:-/dockerx/TE_HD256}"
+CONTAINER="${HD256_CONTAINER:-ym_hd256}"
+
+echo "=== TE_HD256 hd256 resume ==="
+echo "Branch:  ym_te2.12_hd256_jax @ $(git -C "${TE_DIR}" rev-parse --short HEAD 2>/dev/null || echo '?')"
+echo "aiter:   $(git -C "${TE_DIR}/3rdparty/aiter" rev-parse --short HEAD 2>/dev/null || echo '?')"
+echo "Container: ${CONTAINER}"
+echo ""
+echo "Setup (inside container):"
+echo "  podman start ${CONTAINER}   # if stopped"
+echo "  source /root/hd256/bin/activate"
+echo "  source ${TE_DIR}/scripts/env_hd256.sh"
+echo "  source /dockerx/NVTE_env.sh"
+echo "  export HIP_VISIBLE_DEVICES=0"
+echo ""
+echo "Build / install (jax+pytorch wheel, reuses aiter cache on retry):"
+echo "  NVTE_FRAMEWORK=jax,pytorch bash ${TE_DIR}/scripts/build_install_test_hd256.sh retry"
+echo ""
+echo "Tests:"
+echo "  bash ${TE_DIR}/scripts/build_install_test_hd256.sh test_jax"
+echo "  bash ${TE_DIR}/scripts/build_install_test_hd256.sh test_pytorch"
+echo "  pytest ${TE_DIR}/tests/jax/test_fused_attn.py::TestFusedAttnHD256 -v"
+echo "  pytest ${TE_DIR}/tests/pytorch/attention/test_attention.py::test_fused_attn_hd256 -v"
+echo ""
+echo "Benchmarks:"
+echo "  python3 ${TE_DIR}/scripts/bwd_reprod.py --cases dense,thd"
+echo "  python3 ${TE_DIR}/scripts/bwd_reprod_pytorch.py --cases dense,thd"
+echo "  python3 ${TE_DIR}/scripts/thd_padding_acc.py --masks padding,causal"
+echo ""
+echo "Installed wheel (if built):"
+pip show transformer-engine 2>/dev/null | grep -E '^Version|^Location' || true

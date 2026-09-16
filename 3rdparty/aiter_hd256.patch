@@ -1,0 +1,71 @@
+diff --git a/aiter/ops/mha.py b/aiter/ops/mha.py
+index 7877a713d..7df788a65 100644
+--- a/aiter/ops/mha.py
++++ b/aiter/ops/mha.py
+@@ -2518,12 +2518,19 @@ def _flash_attn_backward(
+         ret &= not deterministic or is_950_1block
+         ret &= nhead_q % nhead_k == 0
+         ret &= (
+-            (hdim_q > 64 and hdim_q <= 128) or (hdim_q == 192 and hdim_v == 128)
++            (hdim_q > 64 and hdim_q <= 128)
++            or (hdim_q == 192 and hdim_v == 128)
++            or (hdim_q == 256 and hdim_v == 256)
+         ) and hdim_q % 8 == 0
+         ret &= not swa
++        if hdim_q == 256:
++            ret &= not causal
++            ret &= q.dtype == dtypes.bf16
+         return ret
+ 
+     can_impl_fmha_v3_bwd_ |= can_impl_fmha_v3_bwd_gfx950()
++    if get_gfx() == "gfx950" and hdim_q == 256:
++        is_v3_atomic_fp32 = False
+ 
+     if (
+         can_impl_fmha_v3_bwd_ and seqlen_q > 16
+@@ -3306,11 +3313,11 @@ def _flash_attn_varlen_backward(
+         ret &= not swa
+         if hdim_q == 256:
+             ret &= not causal
++            ret &= q.dtype == dtypes.bf16
+ 
+         return ret
+ 
+     can_impl_fmha_v3_bwd_ = can_impl_fmha_v3_bwd() or can_impl_fmha_v3_bwd_gfx950()
+-    # gfx950 hd256 backward uses a16 (atomic32=0)
+     if get_gfx() == "gfx950" and hdim_q == 256:
+         is_v3_atomic_fp32 = False
+     # dq, dk, dv are allocated by us so they should already be contiguous
+diff --git a/csrc/cpp_itfs/mha_bwd.cu b/csrc/cpp_itfs/mha_bwd.cu
+index e729f05f2..f3ff5683e 100644
+--- a/csrc/cpp_itfs/mha_bwd.cu
++++ b/csrc/cpp_itfs/mha_bwd.cu
+@@ -386,6 +386,11 @@ float fmha_v3_bwd(mha_bwd_args a, const ck_tile::stream_config& s)
+         return -1;
+     }
+ 
++    if(a.hdim_q == 256 && a.hdim_v == 256 && a.data_type != "bf16")
++    {
++        return -1;
++    }
++
+     // ASM mask type
+     // 0: no mask
+     // 1: top-left triangular
+diff --git a/csrc/cpp_itfs/mha_fwd.cu b/csrc/cpp_itfs/mha_fwd.cu
+index 9044f189f..4dee7a8b3 100644
+--- a/csrc/cpp_itfs/mha_fwd.cu
++++ b/csrc/cpp_itfs/mha_fwd.cu
+@@ -215,6 +215,12 @@ float fmha_fwd_v3(mha_fwd_args a, const ck_tile::stream_config& s)
+     bool hdim_ok = (a.hdim_q == 128 && a.hdim_v == 128) ||
+                    (a.hdim_q == 192 && a.hdim_v == 128) ||
+                    (a.hdim_q == 256 && a.hdim_v == 256);
++    // hd256 bf16 fwd ASM is gfx950 group-mode only (non-causal via CSV).
++    if(a.hdim_q == 256 && a.hdim_v == 256 && a.data_type == "bf16" &&
++       (arch_id != "gfx950" || !a.is_group_mode))
++    {
++        return -1;
++    }
+     if(!hdim_ok ||
+        (a.data_type != "bf16" && a.data_type != "fp8bf16") || (a.bias_type != 0) || (a.p_drop > 0.f) ||
+        ((arch_id != "gfx942") && (arch_id != "gfx950")))
