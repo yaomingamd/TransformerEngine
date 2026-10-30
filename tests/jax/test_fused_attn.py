@@ -303,10 +303,15 @@ def general_dot_product_attention(
         # reshape logits back to original
         logits = logits.reshape((b, h_kv, num_groups, s_q, s_kv))
 
+    row_fully_masked = None
     if mask is not None:
         if mask.ndim != logits.ndim:
             mask = jnp.expand_dims(mask, axis=-3)
-        logits = jnp.where(mask, jnp.finfo(dtype).min, logits)
+        # A row with every key masked has no attention output. Softmax of an all-masked
+        # row is uniform, so zero it to match the fused kernels, including gfx950 causal
+        # ASM rows where seqlen_q > seqlen_k.
+        row_fully_masked = jnp.all(mask, axis=-1, keepdims=True)
+        logits = jnp.where(row_fully_masked, 0, jnp.where(mask, jnp.finfo(dtype).min, logits))
 
     if score_mod_reference is not None:
         # Kernel tests use NO_MASK; fused_attn rejects mask+score_mod before this reference path.
@@ -333,6 +338,9 @@ def general_dot_product_attention(
             softmax_out = softmax_with_extra[..., :-1].astype(dtype)
         case _:
             raise NotImplementedError(f"Unknown {softmax_type=}")
+
+    if row_fully_masked is not None:
+        softmax_out = jnp.where(row_fully_masked, 0, softmax_out)
 
     # [ROCm] Zero out softmax for fully-masked rows to prevent NaN propagation in backward
     # Reuses bias_all_neg_mask from the pre-softmax block above to avoid drift.
@@ -448,7 +456,18 @@ def make_mask(
     return mask
 
 
-@jax.jit
+def _packed_segment(batch_size, max_seqlen, lengths):
+    """Build one packed segment per batch, with padding after each requested length."""
+    segment_ids = np.zeros((batch_size, max_seqlen), dtype=np.int32)
+    segment_pos = np.zeros((batch_size, max_seqlen), dtype=np.int32)
+    segment_pad = np.ones((batch_size, max_seqlen), dtype=np.int32)
+    for index, length in enumerate(lengths):
+        segment_ids[index, :length] = 1
+        segment_pos[index, :length] = np.arange(length, dtype=np.int32)
+        segment_pad[index, :length] = 0
+    return tuple(map(jnp.asarray, (segment_ids, segment_pos, segment_pad)))
+
+
 def get_seqlens_and_offsets(segment_ids):
     batch, max_seqlen = segment_ids.shape
     bincount_vmap = jax.vmap(partial(jnp.bincount, length=max_seqlen))
@@ -748,6 +767,23 @@ class FusedAttnRunner:
         else:
             return 1
 
+    def _supports_gfx950_bf16_hd256_asm(self):
+        """Return whether this config matches the gfx950 BF16 D=256 THD ASM contract."""
+        no_window = self.window_size is None or self.window_size == (-1, -1)
+        return (
+            is_hip_extension()
+            and get_device_compute_capability(0) == 95
+            and self.dtype == jnp.bfloat16
+            and self.head_dim_qk == 256
+            and self.head_dim_v == 256
+            and self.num_heads_q == self.num_heads_kv
+            and self.qkv_layout == QKVLayout.THD_THD_THD
+            and self.attn_bias_type == AttnBiasType.NO_BIAS
+            and self.dropout_prob == 0.0
+            and self.softmax_type == AttnSoftmaxType.VANILLA_SOFTMAX
+            and no_window
+        )
+
     def _check_configs(self):
         # Trim SWA configs for L0 and L1 to reduce test time; need to trim more in future test refactoring.
         if self.window_size is not None and (
@@ -775,7 +811,10 @@ class FusedAttnRunner:
             pytest.skip("THD format requires padding masks.")
 
         if self.attn_mask_type.is_bottom_right():
-            if self.max_seqlen_q > self.max_seqlen_kv:
+            allows_longer_query = (
+                self._supports_gfx950_bf16_hd256_asm() and not self.is_training
+            )
+            if self.max_seqlen_q > self.max_seqlen_kv and not allows_longer_query:
                 pytest.skip(
                     "BRCM requires cross attn type pattern, i.e.max_seqlen_kv >= max_seqlen_q"
                 )
@@ -805,7 +844,9 @@ class FusedAttnRunner:
             and is_hip_extension()
             and (self.head_dim_qk == 256 or self.head_dim_v == 256)
         ):
-            pytest.skip("D=256 backward fused attention is not supported on ROCm.")
+            # The gfx950 BF16 D=256 backward ASM kernel is noncausal MHA in THD layout.
+            if self.attn_mask_type.is_causal() or not self._supports_gfx950_bf16_hd256_asm():
+                pytest.skip("D=256 backward fused attention is not supported on ROCm.")
         is_sm10x = 100 <= compute_capability < 110
         if self.is_training and is_sm10x and (self.head_dim_qk == 256 or self.head_dim_v == 256):
             if self.head_dim_qk != 256 or self.head_dim_v != 256:
@@ -1170,7 +1211,26 @@ class FusedAttnRunner:
             return segment_ids, segment_pos, segment_pad
 
         if self.qkv_layout.is_thd():
-            if is_hip_extension() and self.use_thd_smallseq_segments:
+            if (
+                self._supports_gfx950_bf16_hd256_asm()
+                and self.attn_mask_type.is_bottom_right()
+                and self.max_seqlen_q > self.max_seqlen_kv
+            ):
+                # Keep one query segment longer than its key segment. The shared random
+                # generator otherwise forces kv_len >= q_len for bottom-right masks.
+                if self.batch_size != 2:
+                    pytest.fail("The gfx950 q>k segment fixture expects batch_size=2.")
+                q_lengths = (self.max_seqlen_q * 3 // 4, self.max_seqlen_q - 16)
+                kv_lengths = (self.max_seqlen_kv // 2, self.max_seqlen_kv // 2 + 16)
+                self.segment_ids_q, self.segment_pos_q, self.pad_q = _packed_segment(
+                    self.batch_size, self.max_seqlen_q, q_lengths
+                )
+                self.segment_ids_kv, self.segment_pos_kv, self.pad_kv = _packed_segment(
+                    self.batch_size, self.max_seqlen_kv, kv_lengths
+                )
+                self.seqlens_q, self.offsets_q = get_seqlens_and_offsets(self.segment_ids_q)
+                self.seqlens_kv, self.offsets_kv = get_seqlens_and_offsets(self.segment_ids_kv)
+            elif is_hip_extension() and self.use_thd_smallseq_segments:
                 (
                     self.num_segments_per_seq,
                     self.segment_ids_q,

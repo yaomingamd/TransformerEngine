@@ -93,6 +93,8 @@ run_test_config(){
     run_default_fa 1 test_sanity_import.py
     run_default_fa 1 test_torch_compile.py
     run_default_fa 1 attention/test_attention.py # Backend selection is controlled by the test
+    # gfx950 BF16 HD256 AITER ASM backward is registered for atomic16 only.
+    NVTE_CK_IS_V3_ATOMIC_FP32=0 run_default_fa_lbl "atomic16" 1 attention/test_attention_gfx950.py
     NVTE_ALLOW_NONDETERMINISTIC_ALGO=0 run_default_fa_lbl "deterministic" 3 attention/test_attention.py -k "test_deterministic_bwd_ck"
     run_default_fa 1 attention/test_cp_utils.py
     run_default_fa 1 attention/test_kv_cache.py

@@ -21,8 +21,9 @@ sys.path.append(tests_path)
 from tests.pytorch.utils import (
     ModelConfig,
     get_available_attention_backends,
+    reset_rng_states,
 )
-from tests.pytorch.attention.test_attention import run_dot_product_attention
+from tests.pytorch.attention.test_attention import _generate_seqlens, run_dot_product_attention
 
 pd.set_option("display.precision", 4)
 
@@ -49,6 +50,11 @@ model_configs = {
     "test_2": ModelConfig(2, 2048, 16, 128, attn_mask_type="causal", attn_bias_type="post_scale_bias"),  # bias
     "test_3": ModelConfig(2, 8192, 32, 128, num_gqa_groups=4, attn_mask_type="causal"),  # GQA
     "test_4": ModelConfig(2, 8192, 128, 128, num_gqa_groups=8, attn_mask_type="causal_bottom_right")
+}
+
+asm_model_configs = {
+    # Match the gfx950 BF16 D=256 AITER ASM contract: THD, MHA, non-causal, A16 bwd.
+    "gfx950_bf16_d256_thd": ModelConfig(8, 2560, 18, 256),
 }
 
 # DataFrame indices and columns for results
@@ -242,9 +248,30 @@ def benchmark_dot_product_attention_profiler(model, attention, column_name):
     torch.cuda.empty_cache()
 
 # Calculate TFLOPs for attention operations
-def calculate_attention_tflops(batch_size, seq_len, num_heads_q, head_dim_qk, fwd_time_ms, bwd_time_ms, is_causal):
-    # Calculate total fwdFLOPs
-    fwd_flops = (0.5 if is_causal else 1.0) * 4 * batch_size * seq_len * seq_len * num_heads_q * head_dim_qk / 1e12
+def calculate_attention_tflops(config, fwd_time_ms, bwd_time_ms):
+    """Calculate TFLOPs from the actual packed-token sequence lengths."""
+    is_causal = "causal" in config.attn_mask_type.lower()
+    if qkv_layout.startswith("thd"):
+        reset_rng_states()
+        seqlens = _generate_seqlens(config, "thd", pad_between_seqs)
+        q_lens = seqlens.q.to(dtype=torch.int64)
+        kv_lens = seqlens.kv.to(dtype=torch.int64)
+        if is_causal and torch.equal(q_lens, kv_lens):
+            attention_pairs = (q_lens * (q_lens + 1) // 2).sum().item()
+        else:
+            attention_pairs = (q_lens * kv_lens).sum().item()
+        fwd_flops = 4 * attention_pairs * config.num_heads * config.head_dim_qk / 1e12
+    else:
+        fwd_flops = (
+            (0.5 if is_causal else 1.0)
+            * 4
+            * config.batch_size
+            * config.max_seqlen_q
+            * config.max_seqlen_kv
+            * config.num_heads
+            * config.head_dim_qk
+            / 1e12
+        )
     # Calculate forward TFLOPs
     fwd_tflops = fwd_flops / (fwd_time_ms / 1000.0)
     # Calculate backward TFLOPs
@@ -298,11 +325,7 @@ def parse_helper(
     
     # Calculate TFLOPs for both forward and backward
     config = model_configs[model]
-    is_causal = "causal" in config.attn_mask_type.lower()
-    fwd_tflops, bwd_tflops = calculate_attention_tflops(
-        config.batch_size, config.max_seqlen_q, config.num_heads, 
-        config.head_dim_qk, fwd_time_ms, bwd_time_ms, is_causal
-    )
+    fwd_tflops, bwd_tflops = calculate_attention_tflops(config, fwd_time_ms, bwd_time_ms)
     
     df_times.loc[model, f"{column_name} TFLOPs (fwd)"] = fwd_tflops
     df_times.loc[model, f"{column_name} TFLOPs (bwd)"] = bwd_tflops
@@ -406,6 +429,20 @@ def sanity_checks(
 
 
 def main(args):
+    global indices, model_configs, pad_between_seqs, qkv_layout
+
+    if args.gfx950_bf16_hd256_asm:
+        device_properties = torch.cuda.get_device_properties(torch.cuda.current_device())
+        arch = device_properties.gcnArchName.split(":")[0]
+        if arch != "gfx950":
+            print(f"Skipping gfx950 BF16 HD256 ASM benchmark on {arch}.")
+            return
+        model_configs = asm_model_configs
+        indices = list(model_configs)
+        qkv_layout = "thd_thd_thd"
+        pad_between_seqs = False
+        args.use_ck_v3_a16 = True
+
     output_dir = os.path.join(cwd, output_dir_name + "/")
     output_csv_path = os.path.join(cwd, output_csv)
 
@@ -509,6 +546,11 @@ if __name__ == "__main__":
     parser.add_argument("--no_ck_bwd_v3", action="store_false", dest="use_ck_bwd_v3", help="Set NVTE_CK_USES_BWD_V3=0 for CK bwd kernels")
     parser.add_argument("--no_ck_fwd_v3", action="store_false", dest="use_ck_fwd_v3", help="Set NVTE_CK_USES_FWD_V3=0 for CK fwd kernels")
     parser.add_argument("--use_ck_v3_a16", action="store_true", help="Use NVTE_CK_IS_V3_ATOMIC_FP32=0 for atomic16. Default is 1")
+    parser.add_argument(
+        "--gfx950_bf16_hd256_asm",
+        action="store_true",
+        help="Benchmark the gfx950 BF16 HD256 THD AITER ASM forward and backward kernels.",
+    )
     parser.add_argument("--run_sanity_checks", action="store_true", help="After benchmarking, verify profiler outputs.")
     args = parser.parse_args()
     main(args)

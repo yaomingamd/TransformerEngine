@@ -16,6 +16,7 @@ from transformer_engine.jax.attention import (
     AttnSoftmaxType,
     QKVLayout,
 )
+from transformer_engine_jax import get_device_compute_capability
 from transformer_engine.jax import fp8_autocast
 
 # Add test_fused_attn to the sys path 
@@ -71,6 +72,21 @@ CONFIGS = tuple(
         BIAS_CONFIGS,
     )
 )
+# gfx950 BF16 D=256 AITER ASM contract: THD, MHA, noncausal, atomic16 backward.
+GFX950_BF16_HD256_ASM_CONFIGS = (
+    (
+        (8, 2560, 2560, 18, 18, 256, 256),
+        jnp.bfloat16,
+        AttnMaskType.PADDING_MASK,
+        QKVLayout.THD_THD_THD,
+        SeqDescFormat.Seqlens,
+        False,
+        True,
+        0.0,
+        (AttnBiasType.NO_BIAS, None),
+    ),
+)
+ACTIVE_CONFIGS = CONFIGS
 
 COLUMNS = [
     "batch_size",
@@ -244,6 +260,43 @@ class FusedAttnBenchRunner(FusedAttnRunner):
 
             del os.environ["NVTE_DUMP_AITER_RT"]
 
+def _fused_attn_available(
+    is_training,
+    dtype,
+    qkv_layout,
+    attn_bias_type,
+    attn_mask_type,
+    dropout_prob,
+    batch_size,
+    num_heads_q,
+    num_heads_kv,
+    max_seqlen_q,
+    max_seqlen_kv,
+    head_dim_qk,
+    head_dim_v,
+    window_size,
+):
+    helper = FusedAttnHelper(
+        is_training=is_training,
+        batch_size=batch_size,
+        q_dtype=dtype,
+        kv_dtype=dtype,
+        qkv_layout=qkv_layout,
+        attn_bias_type=attn_bias_type,
+        attn_mask_type=attn_mask_type,
+        softmax_type=AttnSoftmaxType.VANILLA_SOFTMAX,
+        dropout_probability=dropout_prob,
+        q_num_heads=num_heads_q,
+        kv_num_heads=num_heads_kv,
+        q_max_seqlen=max_seqlen_q,
+        kv_max_seqlen=max_seqlen_kv,
+        head_dim_qk=head_dim_qk,
+        head_dim_v=head_dim_v,
+        window_size=(-1, -1) if window_size is None else window_size,
+    )
+    return helper.is_fused_attn_kernel_available()
+
+
 def _filter_configs(configs):
     for config in configs:
         (
@@ -275,21 +328,22 @@ def _filter_configs(configs):
         if d_qk != d_v and not qkv_layout.is_separate():
             continue
 
-        backend = FusedAttnHelper(
+        if not _fused_attn_available(
             is_training,
-            dtype,
             dtype,
             qkv_layout,
             attn_bias_type,
             attn_mask_type,
-            AttnSoftmaxType.VANILLA_SOFTMAX,
             dropout_prob,
-            h_q, h_kv,
-            s_q, s_kv,
-            d_qk, d_v,
-            (-1, -1) if window_size is None else window_size,
-        ).get_fused_attn_backend()
-        if backend == -1:
+            b,
+            h_q,
+            h_kv,
+            s_q,
+            s_kv,
+            d_qk,
+            d_v,
+            window_size,
+        ):
             continue
         if (
             attn_bias_type == AttnBiasType.POST_SCALE_BIAS
@@ -311,7 +365,7 @@ def benchmark_dot_product_attention_profiler(args):
     src_dir = Path(__file__).parent
     timings_dir = src_dir / "timings"
     os.makedirs(timings_dir, exist_ok=True)
-    for n, config in enumerate(_filter_configs(CONFIGS)):
+    for n, config in enumerate(_filter_configs(ACTIVE_CONFIGS)):
         (
             shape,
             dtype,
@@ -375,21 +429,39 @@ def benchmark_dot_product_attention_profiler(args):
     os.rmdir(timings_dir)
     output_path = Path(__file__).parent
     os.makedirs(output_path, exist_ok=True)
-    with open(output_path / "times.csv", "w", newline="") as csvfile:
+    csv_path = output_path / "times.csv"
+    with open(csv_path, "w", newline="") as csvfile:
         writer = csv.DictWriter(csvfile, fieldnames=COLUMNS)
         writer.writeheader()
         writer.writerows(rows)
 
+    if not rows:
+        print("No benchmark configurations ran.")
+        return
+    timings = pd.DataFrame(rows)
+    # AITER reports each kernel launch in milliseconds.
+    summary = timings.groupby("mode", sort=False)["time"].agg(["mean", "median", "min", "max"])
+    summary = summary.rename(
+        columns={"mean": "mean_ms", "median": "median_ms", "min": "min_ms", "max": "max_ms"}
+    )
+    print("\nAITER kernel time (ms)")
+    print(summary.to_string(float_format=lambda value: f"{value:.4f}"))
+    print(f"\nPer-iteration timings written to {csv_path}")
+
 class env_manager:
-    def __init__(self, fwd, bwd):
+    def __init__(self, fwd, bwd, atomic16=False):
         self.vals = {}
         self.config = ((fwd, "FWD"), (bwd, "BWD"))
+        self.atomic16 = atomic16
 
     def __enter__(self):
         for flag, mode in self.config:
             if flag:
                 self.vals[mode] = os.environ.get(f"NVTE_CK_USES_{mode}_V3")
                 os.environ[f"NVTE_CK_USES_{mode}_V3"] = "1"
+        if self.atomic16:
+            self.vals["ATOMIC16"] = os.environ.get("NVTE_CK_IS_V3_ATOMIC_FP32")
+            os.environ["NVTE_CK_IS_V3_ATOMIC_FP32"] = "0"
 
     def __exit__(self, exc_type, exc_value, traceback):
         for flag, mode in self.config:
@@ -397,9 +469,22 @@ class env_manager:
                 del os.environ[f"NVTE_CK_USES_{mode}_V3"]
                 if self.vals[mode]:
                     os.environ[f"NVTE_CK_USES_{mode}_V3"] = self.vals[mode]
+        if self.atomic16:
+            del os.environ["NVTE_CK_IS_V3_ATOMIC_FP32"]
+            if self.vals["ATOMIC16"]:
+                os.environ["NVTE_CK_IS_V3_ATOMIC_FP32"] = self.vals["ATOMIC16"]
 
 def main(args):
-    with env_manager(args.fwd_v3, args.bwd_v3):
+    global ACTIVE_CONFIGS
+    if args.gfx950_bf16_hd256_asm:
+        if get_device_compute_capability(0) != 95:
+            print("Skipping gfx950 BF16 HD256 ASM benchmark on this device.")
+            return
+        ACTIVE_CONFIGS = GFX950_BF16_HD256_ASM_CONFIGS
+        args.fwd_v3 = True
+        args.bwd_v3 = True
+        args.bench_bwd = True
+    with env_manager(args.fwd_v3, args.bwd_v3, atomic16=args.gfx950_bf16_hd256_asm):
         benchmark_dot_product_attention_profiler(args)
  
 if __name__ == "__main__":
@@ -407,6 +492,11 @@ if __name__ == "__main__":
     parser.add_argument("--bench-bwd", action="store_true", help="Whether to bench the backwards pass as well.")
     parser.add_argument("--fwd-v3", action="store_true", help="Use NVTE_CK_USES_FWD_V3=1 for AITER fwd kernels.")
     parser.add_argument("--bwd-v3", action="store_true", help="Use NVTE_CK_USES_BWD_V3=1 for AITER bwd kernels.")
+    parser.add_argument(
+        "--gfx950-bf16-hd256-asm",
+        action="store_true",
+        help="Benchmark gfx950 BF16 HD256 THD AITER ASM forward and backward.",
+    )
     parser.add_argument("-v", action='count', default=0, help="Whether to include verbose debug outputs.")
     parser.add_argument("--warmup", type=int, default=10, help="The number of iterations to run the kernel before logging run time. (default 10)")
     parser.add_argument("--iters", type=int, default=50, help="The number of iterations to run the kernel while logging run time. (default 50)")

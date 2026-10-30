@@ -65,7 +65,9 @@ run_test_config() {
     # bf16 atomic dq accumulation (dq_shuffle post-kernel). Default is fp32 (atomic32/dq_convert), so the
     # bf16 dq_acc path is otherwise never exercised in CI. Scope to THD/RAGGED backward where the
     # group-mode per-segment dq_acc layout matters (see the equal-dim-128 RAGGED_SELF config).
+    # gfx950 BF16 HD256 AITER ASM backward is registered for atomic16 only.
     NVTE_CK_IS_V3_ATOMIC_FP32=0 run_default_fa_lbl "atomic16" 3 test_fused_attn.py -k "test_backward and RAGGED"
+    NVTE_CK_IS_V3_ATOMIC_FP32=0 run_default_fa_lbl "atomic16" 1 test_fused_attn_gfx950.py
     run_default_fa 1 test_layer.py # it effectively always uses unfused attention
     run_default_fa 1 test_fused_router.py
     run_default_fa 1 test_misc.py
