@@ -59,10 +59,14 @@ _deterministic = not bool(int(os.getenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1")
 # CI test level
 _TEST_LEVEL = get_test_level()
 
-# AITER FP8 fused attention is inference-only and ships only for gfx950.
-rocm_fp8_attention_support = pytest.mark.skipif(
+# CK tile FP8 forward runs on gfx942 and gfx950. ASM FP8 is gfx950-only.
+rocm_fp8_ck_support = pytest.mark.skipif(
+    not is_hip_extension() or get_device_compute_capability(0) not in (94, 95),
+    reason="CK FP8 fused attention requires gfx942 or gfx950",
+)
+rocm_fp8_asm_support = pytest.mark.skipif(
     not is_hip_extension() or get_device_compute_capability(0) != 95,
-    reason="AITER FP8 ASM fused attention requires gfx950",
+    reason="FP8 ASM fused attention requires gfx950",
 )
 
 
@@ -76,13 +80,13 @@ def init():
     yield
 
 
-@rocm_fp8_attention_support
+@rocm_fp8_asm_support
 @pytest.mark.parametrize("head_dim", [128, 256])
 def test_aiter_fp8_fwd_backend_selection(head_dim):
     """gfx950 fp8bf16 inference selects CK/AITER.
 
-    Training stays unsupported. NVTE_CK_USES_FWD_V3=0 also selects no backend
-    until a CK tile FP8 path exists.
+    Training stays unsupported. NVTE_CK_USES_FWD_V3 selects AITER ASM or the
+    CK tile fallback.
     """
     kwargs = dict(
         batch_size=1,
@@ -114,14 +118,26 @@ def test_aiter_fp8_fwd_backend_selection(head_dim):
     assert sliding_window_backend == NVTE_Fused_Attn_Backend.NVTE_No_Backend
 
 
-@rocm_fp8_attention_support
-@pytest.mark.parametrize("head_dim", [128, 256])
-def test_aiter_fp8_fwd_asm(head_dim):
-    """Small dense smoke: load the fp8bf16 ASM kernel and check vs a float32 JAX reference.
+@rocm_fp8_ck_support
+@pytest.mark.parametrize(
+    "head_dim, uses_fwd_v3",
+    [
+        pytest.param(128, True, id="asm-d128"),
+        pytest.param(256, True, id="asm-d256"),
+        pytest.param(64, False, id="ck-d64"),
+        pytest.param(128, False, id="ck-d128"),
+        pytest.param(256, False, id="ck-d256"),
+    ],
+)
+def test_fp8_fwd(head_dim, uses_fwd_v3, monkeypatch):
+    """Small dense fp8bf16 smoke for both AITER ASM and CK tile forward paths.
 
     Broader HD128/HD256 accuracy (masks, THD padding, GQA, vs BF16 ASM) lives in
     TestFusedAttnFP8ASM.
     """
+    monkeypatch.setenv("NVTE_CK_USES_FWD_V3", str(int(uses_fwd_v3)))
+    if uses_fwd_v3 and get_device_compute_capability(0) != 95:
+        pytest.skip("FP8 ASM requires gfx950.")
     backend, _ = FusedAttnHelper(
         is_training=False,
         batch_size=1,
@@ -141,7 +157,7 @@ def test_aiter_fp8_fwd_asm(head_dim):
         window_size=(-1, -1),
     ).get_fused_attn_backend()
     if backend == NVTE_Fused_Attn_Backend.NVTE_No_Backend:
-        pytest.skip("AITER FP8 ASM fused attention backend is disabled")
+        pytest.fail(f"FP8 {'ASM' if uses_fwd_v3 else 'CK'} fused attention backend is disabled")
     assert backend == NVTE_Fused_Attn_Backend.NVTE_CK
 
     shape = (1, 128, 8, head_dim)
@@ -188,7 +204,7 @@ def test_aiter_fp8_fwd_asm(head_dim):
     assert float(jnp.max(jnp.abs(output.astype(jnp.float32) - reference))) < 0.01
 
 
-@rocm_fp8_attention_support
+@rocm_fp8_asm_support
 @pytest.mark.parametrize("head_dim", [128, 256])
 def test_aiter_fp8_fwd_asm_jit_scales(head_dim):
     """Inference jit must accept scale inverses as traced arguments.
@@ -2899,7 +2915,14 @@ def _fused_attn_keep_output_dtype(
     )
 
 
-@rocm_fp8_attention_support
+@rocm_fp8_ck_support
+@pytest.mark.parametrize(
+    "uses_fwd_v3",
+    [
+        pytest.param(True, id="asm"),
+        pytest.param(False, id="ck"),
+    ],
+)
 @pytest.mark.parametrize(
     "attn_mask_type",
     [
@@ -2912,6 +2935,26 @@ def _fused_attn_keep_output_dtype(
 @pytest.mark.parametrize(
     "b, s_q, s_kv, h_q, h_kv, d, qkv_layout",
     [
+        pytest.param(
+            2,
+            512,
+            512,
+            8,
+            8,
+            64,
+            QKVLayout.BSHD_BSHD_BSHD,
+            id="2-512-8-64-BSHD-MHA",
+        ),
+        pytest.param(
+            2,
+            512,
+            512,
+            8,
+            4,
+            64,
+            QKVLayout.BSHD_BSHD_BSHD,
+            id="2-512-8-4-64-BSHD-GQA",
+        ),
         pytest.param(
             2,
             512,
@@ -2958,6 +3001,26 @@ def _fused_attn_keep_output_dtype(
             512,
             8,
             8,
+            64,
+            QKVLayout.THD_THD_THD,
+            id="2-512-8-64-THD-MHA",
+        ),
+        pytest.param(
+            2,
+            512,
+            512,
+            8,
+            4,
+            64,
+            QKVLayout.THD_THD_THD,
+            id="2-512-8-4-64-THD-GQA",
+        ),
+        pytest.param(
+            2,
+            512,
+            512,
+            8,
+            8,
             128,
             QKVLayout.THD_THD_THD,
             id="2-512-8-128-THD-MHA",
@@ -2995,18 +3058,27 @@ def _fused_attn_keep_output_dtype(
     ],
 )
 class TestFusedAttnFP8ASM:
-    """gfx950 fp8bf16 ASM fused-attn accuracy vs JAX softmax and vs BF16 ASM.
+    """gfx950 fp8bf16 fused-attn accuracy vs JAX softmax and vs BF16 fused attention.
 
-    Coverage mirrors the BF16 HD128/HD256 runner tests: dense BSHD (no/causal)
-    and varlen THD (padding / padding-causal), MHA and GQA, hd128 and hd256.
-    Inference only — FP8 ASM has no training path.
+    ``uses_fwd_v3=True`` keeps the AITER ASM path (gfx950, head dims 128 and 256).
+    ``uses_fwd_v3=False`` runs the same masks and layouts on CK tile forward,
+    including head dim 64, on gfx942 and gfx950. Inference only — FP8 fused
+    attention has no training path.
     """
 
     @staticmethod
-    def test_forward(attn_mask_type, b, s_q, s_kv, h_q, h_kv, d, qkv_layout):
+    def test_forward(
+        uses_fwd_v3, attn_mask_type, b, s_q, s_kv, h_q, h_kv, d, qkv_layout, monkeypatch
+    ):
+        monkeypatch.setenv("NVTE_CK_USES_FWD_V3", "1" if uses_fwd_v3 else "0")
+        path = "ASM" if uses_fwd_v3 else "CK"
         if qkv_layout.is_thd() and not attn_mask_type.is_padding():
             pytest.skip("THD format requires padding masks.")
-        if attn_mask_type.is_padding() and not qkv_layout.is_thd():
+        if uses_fwd_v3 and get_device_compute_capability(0) != 95:
+            pytest.skip("FP8 ASM requires gfx950.")
+        if uses_fwd_v3 and d not in (128, 256):
+            pytest.skip("FP8 ASM supports head dims 128 and 256 only.")
+        if uses_fwd_v3 and attn_mask_type.is_padding() and not qkv_layout.is_thd():
             pytest.skip("FP8 ASM requires THD layout for padding masks.")
 
         runner = FusedAttnRunner(
@@ -3063,9 +3135,9 @@ class TestFusedAttnFP8ASM:
             window_size=(-1, -1),
         ).get_fused_attn_backend()
         if fp8_backend == NVTE_Fused_Attn_Backend.NVTE_No_Backend:
-            pytest.skip("AITER FP8 ASM fused attention backend is disabled")
+            pytest.skip(f"FP8 {path} fused attention backend is disabled")
         assert fp8_backend == NVTE_Fused_Attn_Backend.NVTE_CK, (
-            f"FP8 ASM was not selected: backend={fp8_backend}"
+            f"FP8 {path} was not selected: backend={fp8_backend}"
         )
 
         kwargs = dict(
@@ -3112,22 +3184,22 @@ class TestFusedAttnFP8ASM:
             fp8_invalid,
             jnp.zeros_like(fp8_invalid),
             dtype=jnp.bfloat16,
-            err_msg="FP8 ASM wrote non-zero values into padded tokens",
+            err_msg=f"FP8 {path} wrote non-zero values into padded tokens",
         )
         # JAX softmax reference on the same dequantized FP8 inputs.
         assert_allclose(
             fp8_valid,
             ref_valid,
             dtype=jnp.float8_e4m3fn,
-            err_msg="FP8 ASM vs JAX softmax reference",
+            err_msg=f"FP8 {path} vs JAX softmax reference",
         )
-        # Same inputs through the BF16 ASM/CK path; residual should stay in e4m3 range.
+        # Same inputs through BF16 fused attention; residual should stay in e4m3 range.
         assert_allclose(
             fp8_valid,
             bf16_valid,
             dtype=jnp.float8_e4m3fn,
-            err_msg="FP8 ASM vs BF16 ASM on identical dequantized QKV",
+            err_msg=f"FP8 {path} vs BF16 fused attention on identical dequantized QKV",
         )
-        print_debug_tensor_stats("fp8_asm", fp8_valid)
-        print_debug_tensor_stats("bf16_asm", bf16_valid)
+        print_debug_tensor_stats(f"fp8_{path.lower()}", fp8_valid)
+        print_debug_tensor_stats("bf16", bf16_valid)
         print_debug_tensor_stats("jax_ref", ref_valid)

@@ -140,28 +140,28 @@ bool is_ck_backend_supported(
     return false;
   }
   if(is_fp8){
-    // FP8 is wired to AITER v3 ASM only. CK tile FP8 is not enabled, so turning
-    // ASM off must report unsupported and let the caller select NVTE_No_Backend.
-    // A later PR that enables CK FP8 can fall back to that path here instead.
-    if(getenv<int>("NVTE_CK_USES_FWD_V3", 1) == 0){
-      if(nvte_log_ck_config){
-        std::cout<<"AITER FP8 ASM fwd is disabled by NVTE_CK_USES_FWD_V3=0"<<std::endl;
+    // ASM FP8 is gfx950-only. gfx942 has the CK tile instances, so a default
+    // V3 request there falls through to CK instead of rejecting the backend.
+    // The forward path forces uses_fwd_v3 off on that arch.
+    if(getenv<int>("NVTE_CK_USES_FWD_V3", 1) != 0 && cuda::sm_arch() != 94){
+      const bool fp8_asm_hdim_supported =
+          (head_dim_qk == 128 && head_dim_v == 128) ||
+          (head_dim_qk == 256 && head_dim_v == 256);
+      const bool fp8_asm_window_supported =
+          is_causal ? (window_size_left == -1 && window_size_right == 0)
+                    : (window_size_left == -1 && window_size_right == -1);
+      if(cuda::sm_arch() != 95 || !fp8_asm_hdim_supported ||
+         !fp8_asm_window_supported || (is_padding && !is_ragged)){
+        if(nvte_log_ck_config){
+          std::cout<<"AITER FP8 ASM fwd requires gfx950, hd128/hd256, "
+                     "no sliding-window, and THD for padding masks"<<std::endl;
+        }
+        return false;
       }
-      return false;
     }
-    const bool fp8_hdim_supported =
-        (head_dim_qk == 128 && head_dim_v == 128) ||
-        (head_dim_qk == 256 && head_dim_v == 256);
-    const bool fp8_window_supported =
-        is_causal ? (window_size_left == -1 && window_size_right == 0)
-                  : (window_size_left == -1 && window_size_right == -1);
-    if(cuda::sm_arch() != 95 || is_training || !fp8_hdim_supported ||
-       !fp8_window_supported || dropout != 0.f ||
-       bias_type != NVTE_Bias_Type::NVTE_NO_BIAS ||
-       (is_padding && !is_ragged)){
+    if(is_training || dropout != 0.f || bias_type != NVTE_Bias_Type::NVTE_NO_BIAS){
       if(nvte_log_ck_config){
-        std::cout<<"AITER FP8 ASM fwd requires gfx950 inference, hd128/hd256, "
-                   "no bias/dropout/sliding-window, and THD for padding masks"<<std::endl;
+        std::cout<<"CK FP8 fwd requires inference without bias or dropout"<<std::endl;
       }
       return false;
     }
@@ -530,8 +530,13 @@ void fused_attn_ck_fwd_impl(
   const bool has_sink = softmax_type != NVTE_VANILLA_SOFTMAX;
   const bool nvte_log_ck_config = getenv<bool>("NVTE_LOG_CK_CONFIG");
 
-  // ASM v3 does not support sink; force CK tile path
+  // ASM v3 does not support sink; force CK tile path.
+  // FP8 ASM is gfx950-only. On gfx942, keep the CK tile instances even when
+  // NVTE_CK_USES_FWD_V3 is left at its default.
   bool nvte_ck_uses_fwd_v3 = !has_sink && getenv<int>("NVTE_CK_USES_FWD_V3", 1);
+  if(dtype == DType::kFloat8E4M3 && cuda::sm_arch() == 94){
+    nvte_ck_uses_fwd_v3 = false;
+  }
   int nvte_ck_how_v3_bf16_cvt = getenv<int>("NVTE_CK_HOW_V3_BF16_CVT", 1);
   bool nvte_ck_zero_out_pad = getenv<int>("NVTE_CK_ZERO_OUT_PAD", 1);
   NVTE_QKV_Format qkv_format = nvte_get_qkv_format(layout);
